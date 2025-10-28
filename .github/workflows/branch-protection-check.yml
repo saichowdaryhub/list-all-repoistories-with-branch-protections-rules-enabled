@@ -1,4 +1,4 @@
-name: Branch Protection Audit
+name: Branch Protection Rules Audit
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.BP_PAT }}
           USER_NAME: saichowdaryhub
         run: |
-          echo "🔍 Starting branch protection audit for user: $USER_NAME"
+          echo "Starting branch protection rules audit for user: $USER_NAME"
           page=1
           protected_repos=()
           approval_repos=()
@@ -42,7 +42,7 @@ jobs:
                 approvals=$(jq -r '.required_pull_request_reviews.required_approving_review_count // 0' tmp.json)
                 if [ "$approvals" -eq 2 ]; then
                   approval_repos+=("$repo")
-                  echo "✅ $repo requires 2 approvals before merging"
+                  echo "$repo requires 2 approvals before merging"
                 fi
               fi
             done
@@ -51,7 +51,7 @@ jobs:
           done
 
           echo ""
-          echo "📋 Repositories with branch protection on 'main':"
+          echo "Repositories with branch protection on 'main':"
           if [ ${#protected_repos[@]} -eq 0 ]; then
             echo "None found."
           else
@@ -61,7 +61,7 @@ jobs:
           fi
 
           echo ""
-          echo "📋 Repositories requiring 2 approvals before merging:"
+          echo "Repositories requiring 2 approvals before merging:"
           if [ ${#approval_repos[@]} -eq 0 ]; then
             echo "None found."
           else
@@ -70,4 +70,4 @@ jobs:
             done
           fi
 
-          echo "✅ Branch protection audit completed."
+          echo "Branch protection audit completed."
