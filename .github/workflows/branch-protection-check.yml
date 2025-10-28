@@ -13,33 +13,47 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.BP_PAT }}
           USER_NAME: saichowdaryhub
         run: |
-          echo "Starting branch protection rules audit for user: $USER_NAME"
-          page=1
-          protected_repos=()
-          approval_repos=()
+          # Start the audit
+          echo "Starting branch protection audit for user: $USER_NAME"
 
+          # Initialize variables
+          page=1                             # Page number for pagination (GitHub returns 100 repos per page)
+          protected_repos=()                 # Array to store repos that have branch protection on 'main'
+          approval_repos=()                  # Array to store repos that specifically require 2 approvals
+
+          # Loop through all repositories page by page
           while true; do
+            # Fetch a page of repositories for the user
             repos=$(curl -s \
                         -H "Authorization: token $GITHUB_TOKEN" \
                         -H "Accept: application/vnd.github+json" \
                         "https://api.github.com/users/$USER_NAME/repos?per_page=100&page=$page" \
-                        | jq -r '.[].name')
+                        | jq -r '.[].name')  # Extract only the repository names
 
+            # If no repositories are returned, exit the loop
             if [ -z "$repos" ]; then
               break
             fi
 
+            # Loop through each repository in the current page
             for repo in $repos; do
+              # Fetch branch protection info for the 'main' branch
+              # Save JSON response to tmp.json and store HTTP status code
               response=$(curl -s -w "%{http_code}" -o tmp.json \
                                  -H "Authorization: token $GITHUB_TOKEN" \
                                  -H "Accept: application/vnd.github+json" \
                                  "https://api.github.com/repos/$USER_NAME/$repo/branches/main/protection")
 
-              status=$(tail -n1 <<< "$response")
+              status=$(tail -n1 <<< "$response")  # Extract the HTTP status code
 
+              # If protection exists (status 200)
               if [ "$status" -eq 200 ]; then
-                protected_repos+=("$repo")
+                protected_repos+=("$repo")  # Add repo to protected list
+
+                # Extract number of required approvals from the JSON response
                 approvals=$(jq -r '.required_pull_request_reviews.required_approving_review_count // 0' tmp.json)
+
+                # If required approvals = 2, add to approval list and print message
                 if [ "$approvals" -eq 2 ]; then
                   approval_repos+=("$repo")
                   echo "$repo requires 2 approvals before merging"
@@ -47,9 +61,11 @@ jobs:
               fi
             done
 
+            # Go to the next page of repositories
             page=$((page + 1))
           done
 
+          # Print summary of all repos with branch protection
           echo ""
           echo "Repositories with branch protection on 'main':"
           if [ ${#protected_repos[@]} -eq 0 ]; then
@@ -60,6 +76,7 @@ jobs:
             done
           fi
 
+          # Print summary of repos requiring exactly 2 approvals
           echo ""
           echo "Repositories requiring 2 approvals before merging:"
           if [ ${#approval_repos[@]} -eq 0 ]; then
@@ -70,4 +87,6 @@ jobs:
             done
           fi
 
+          # Final message
           echo "Branch protection audit completed."
+          
