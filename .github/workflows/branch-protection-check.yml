@@ -1,0 +1,51 @@
+name: List Protected Main Branches
+
+on:
+  workflow_dispatch:    # Run manually from the Actions tab
+
+jobs:
+  check-protections:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: List repositories with protected 'main' branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.BP_PAT }}       # using your personal access token
+          USER_NAME: saichowdaryhub                 # your GitHub username
+        run: |
+          echo "🔍 Checking repositories for user: $USER_NAME"
+          page=1
+          protected_repos=()
+
+          while true; do
+            repos=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+                         -H "Accept: application/vnd.github+json" \
+                         "https://api.github.com/users/$USER_NAME/repos?per_page=100&page=$page" | jq -r '.[].name')
+
+            if [ -z "$repos" ]; then
+              break
+            fi
+
+            for repo in $repos; do
+              status=$(curl -s -o /dev/null -w "%{http_code}" \
+                           -H "Authorization: token $GITHUB_TOKEN" \
+                           -H "Accept: application/vnd.github+json" \
+                           "https://api.github.com/repos/$USER_NAME/$repo/branches/main/protection")
+
+              if [ "$status" -eq 200 ]; then
+                protected_repos+=("$repo")
+              fi
+            done
+
+            page=$((page + 1))
+          done
+
+          echo ""
+          echo "✅ Repositories with branch protection on 'main':"
+          if [ ${#protected_repos[@]} -eq 0 ]; then
+            echo "None found."
+          else
+            for repo in "${protected_repos[@]}"; do
+              echo "- $repo"
+            done
+          fi
