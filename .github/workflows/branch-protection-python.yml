@@ -210,7 +210,16 @@ jobs:
           except Exception as e:
               log(f"Failed to write CSV: {e}", "WARN")
 
-          # Slack reporting removed per user request: do not post summary or repo list to Slack
+          # Post a simple completion message to Slack (webhook) per user request
+          if SLACK:
+              try:
+                  r = requests.post(SLACK, json={"text": "Branch Protection Audit Summary is completed"}, timeout=30)
+                  log(f"Slack completion POST -> {r.status_code}")
+                  if r.status_code != 200:
+                      log(f"Slack error response: {r.text}", "WARN")
+              except Exception as e:
+                  log(f"Slack completion POST failed: {e}", "WARN")
+
           EOF
 
       - name: Upload results CSV
