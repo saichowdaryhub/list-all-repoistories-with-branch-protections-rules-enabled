@@ -54,15 +54,15 @@ jobs:
           def list_repos():
               repos, page = [], 1
               while True:
-                  # Use visibility=private parameter to filter at API level
+                  # Use visibility=public parameter to filter at API level
                   data = get_json(f"https://api.github.com/orgs/{ORG}/repos?per_page=100&page={page}&type=all&visibility=public")
                   if not data: break
                   repos += data
                   if len(data) < 100: break
                   page += 1
               # Filter to exclude archived repositories
-              active_private_repos = [r for r in repos if not r.get("archived", False)]
-              return active_private_repos
+              active_public_repos = [r for r in repos if not r.get("archived", False)]
+              return active_public_repos
 
           def get_rules(repo, branch):
               return get_json(f"https://api.github.com/repos/{ORG}/{repo}/rules/branches/{branch}") or []
@@ -78,7 +78,7 @@ jobs:
 
           # ---- Start
           repos = list_repos()
-          log(f"Total active private repositories found: {len(repos)}")
+          log(f"Total active public repositories found: {len(repos)}")
           for r in repos: log(f"→ {r['name']}")
 
           missing, ok = [], []
