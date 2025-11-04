@@ -11,8 +11,8 @@ jobs:
 
     env:
       ORG_NAME: ${{ github.repository_owner }}   # this is your username for personal accounts
-      GITHUB_TOKEN: ${{ secrets.RULESET_PAT }}   # PAT you created
-      SLACK_WEBHOOK: ${{ secrets.EDEVOPS_SLACK_WEBHOOK_URL }}   # Slack webhook URL
+      GITHUB_TOKEN: ${{ secrets.BP_PAT }}   # PAT you created
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}   # Slack webhook URL
       DEBUG: "true"
       PYTHONUNBUFFERED: "1"
 
