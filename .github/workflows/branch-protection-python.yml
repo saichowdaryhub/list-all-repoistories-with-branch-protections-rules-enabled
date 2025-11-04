@@ -28,7 +28,7 @@ jobs:
       - name: Run Branch Protection Audit for User Public Repos
         run: |
           python - <<'EOF'
-          import os, requests, time
+          import os, requests, time, csv
 
           ORG = os.getenv("ORG_NAME")  # in your case, this is your GitHub username
           TOKEN = os.getenv("GITHUB_TOKEN")
@@ -36,7 +36,7 @@ jobs:
           DEBUG = os.getenv("DEBUG","false").lower()=="true"
 
           def log(m,l="INFO"): print(f"[{l}] {m}", flush=True)
-          def dbg(m): 
+          def dbg(m):
               if DEBUG: log(m,"DEBUG")
 
           H = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/vnd.github+json"}
@@ -52,7 +52,6 @@ jobs:
           def list_repos():
               repos, page = [], 1
               while True:
-                  # Use the "users" API for personal accounts (not orgs)
                   data = get_json(f"https://api.github.com/users/{ORG}/repos?per_page=100&page={page}&type=public")
                   if not data: break
                   repos += data
@@ -77,6 +76,7 @@ jobs:
           log(f"Total active public repositories found: {len(repos)}")
           for r in repos: log(f"→ {r['name']}")
 
+          rows = []
           missing, ok = [], []
 
           for idx, repo in enumerate(repos, start=1):
@@ -85,26 +85,56 @@ jobs:
               log(f"\n[{idx}/{len(repos)}] Checking repository: {name}")
               log(f"Default branch for {name} is '{default_branch}'")
 
+              # default CSV row values
+              row = {
+                  "Repository": name,
+                  "Default Branch": default_branch,
+                  "Default branch protection exists": "NO",
+                  "Required pull request": "NO",
+                  "Required approvals count": "",
+                  "Restrict deletions": "NO",
+                  "Block Force pushes": "NO",
+              }
+
               issues = []
               rules = get_rules(name, default_branch)
-              
+
               if not rules:
                   classic = try_get_classic_protection(name, default_branch)
                   if classic:
+                      # mark protection exists
+                      row["Default branch protection exists"] = "YES"
+
                       pr_reviews = classic.get("required_pull_request_reviews")
                       if not pr_reviews:
                           issues.append("Require pull request before merging not enabled")
                       else:
                           cnt = pr_reviews.get("required_approving_review_count", 0)
+                          row["Required pull request"] = "YES"
+                          row["Required approvals count"] = str(int(cnt)) if cnt else ""
                           if int(cnt) != 2:
                               issues.append(f"Required approvals = {cnt}, expected 2")
+
+                      # classic protection: try to infer deletions/force pushes
+                      # if `restrictions` is present, treat deletions as restricted
+                      if classic.get("restrictions"):
+                          row["Restrict deletions"] = "YES"
+
+                      # classic may include 'allow_force_pushes' flag; if present and False -> blocked
+                      if "allow_force_pushes" in classic:
+                          if not classic.get("allow_force_pushes"):
+                              row["Block Force pushes"] = "YES"
+                      else:
+                          # unknown: leave as NO
+                          pass
 
                       if issues:
                           log(f"{name}: ❌ Issues (classic) → {', '.join(issues)}")
                           missing.append({"repo": name, "issues": issues})
                       else:
-                          log(f"{name}: ✅ All required rules in place")
+                          log(f"{name}: ✅ All required rules in place (classic)")
                           ok.append(name)
+                      rows.append(row)
                       continue
 
                   log(f"{name}: ❌ No branch protection found on '{default_branch}'")
@@ -112,28 +142,38 @@ jobs:
                       "repo": name,
                       "issues": [f"No branch protection found on '{default_branch}'"]
                   })
+                  rows.append(row)
                   continue
 
               # Rules found via Rules API
+              row["Default branch protection exists"] = "YES"
               rule_types = {r.get("type"): r for r in rules}
 
-              if "pull_request" not in rule_types:
+              if "pull_request" in rule_types:
+                  row["Required pull request"] = "YES"
+              else:
                   issues.append("Require pull request before merging not enabled")
 
-              if "required_approving_review_count" not in rule_types:
-                  issues.append("Required approving reviews rule missing")
-              else:
+              if "required_approving_review_count" in rule_types:
                   params = rule_types["required_approving_review_count"].get("parameters") or {}
                   count = params.get("required_approving_review_count") or params.get("count")
                   if not count:
                       issues.append("Approvals rule present but count missing")
-                  elif int(count) != 2:
-                      issues.append(f"Required approvals = {count}, expected 2")
+                  else:
+                      row["Required approvals count"] = str(int(count))
+                      if int(count) != 2:
+                          issues.append(f"Required approvals = {count}, expected 2")
+              else:
+                  issues.append("Required approving reviews rule missing")
 
-              if "restrict_deletions" not in rule_types:
+              if "restrict_deletions" in rule_types:
+                  row["Restrict deletions"] = "YES"
+              else:
                   issues.append("Restrict deletions rule not enabled")
 
-              if "non_fast_forward" not in rule_types:
+              if "non_fast_forward" in rule_types:
+                  row["Block Force pushes"] = "YES"
+              else:
                   issues.append("Block force pushes rule not enabled")
 
               if issues:
@@ -143,7 +183,34 @@ jobs:
                   log(f"{name}: ✅ All required rules in place")
                   ok.append(name)
 
-          # ---- Slack Reporting
+              rows.append(row)
+
+          # Write CSV
+          csv_path = "results.csv"
+          fieldnames = [
+              "Repository",
+              "Default Branch",
+              "Default branch protection exists",
+              "Required pull request",
+              "Required approvals count",
+              "Restrict deletions",
+              "Block Force pushes",
+          ]
+          try:
+              with open(csv_path, "w", newline="") as fh:
+                  writer = csv.DictWriter(fh, fieldnames=fieldnames)
+                  writer.writeheader()
+                  for r in rows:
+                      writer.writerow(r)
+              log(f"Wrote CSV results to {csv_path}")
+              # print CSV contents for workflow logs
+              with open(csv_path, "r") as fh:
+                  for line in fh:
+                      print(line.rstrip())
+          except Exception as e:
+              log(f"Failed to write CSV: {e}", "WARN")
+
+          # ---- Slack Reporting (unchanged)
           if SLACK:
               summary_text = (
                   f"*Branch Protection Audit Summary*\n"
@@ -180,3 +247,9 @@ jobs:
                   log(f"Slack summary POST failed: {e}", "WARN")
 
           EOF
+
+      - name: Upload results CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: branch-protection-results
+          path: results.csv
