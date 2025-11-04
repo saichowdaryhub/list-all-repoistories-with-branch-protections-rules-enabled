@@ -1,0 +1,446 @@
+name: Branch Protection Detailed Audit (Rules API + Slack)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    env:
+      ORG_NAME: ${{ github.repository_owner }}
+      GITHUB_TOKEN: ${{ secrets.BP_PAT }}
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+      DEBUG: "true"
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run Unified Branch Protection Audit
+        run: |
+          python - <<'EOF'
+          import os, requests, time
+
+          ORG = os.getenv("ORG_NAME")
+          TOKEN = os.getenv("GITHUB_TOKEN")
+          SLACK = os.getenv("SLACK_WEBHOOK")
+          DEBUG = os.getenv("DEBUG","false").lower()=="true"
+
+          def log(m,l="INFO"): print(f"[{l}] {m}", flush=True)
+          def dbg(m): 
+              if DEBUG: log(m,"DEBUG")
+
+          H = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/vnd.github+json"}
+
+          def get_json(url):
+              r = requests.get(url, headers=H, timeout=30)
+              dbg(f"GET {url} -> {r.status_code}")
+              if r.status_code==200: return r.json()
+              if r.status_code==404: return None
+              log(f"Failed GET {url} -> {r.status_code}: {r.text[:150]}", "WARN")
+              return None
+
+          def list_repos():
+              repos, page = [], 1
+              while True:
+                  # Use visibility=private parameter to filter at API level
+                  data = get_json(f"https://api.github.com/orgs/{ORG}/repos?per_page=100&page={page}&type=all&visibility=private")
+                  if not data: break
+                  repos += data
+                  if len(data) < 100: break
+                  page += 1
+              # Filter to exclude archived repositories
+              active_private_repos = [r for r in repos if not r.get("archived", False)]
+              return active_private_repos
+
+          def get_rules(repo, branch):
+              return get_json(f"https://api.github.com/repos/{ORG}/{repo}/rules/branches/{branch}") or []
+
+          def try_get_classic_protection(repo, branch):
+              # Best-effort classic protection fetch; may return 403 if PAT lacks scope
+              url = f"https://api.github.com/repos/{ORG}/{repo}/branches/{branch}/protection"
+              r = requests.get(url, headers=H, timeout=30)
+              dbg(f"GET {url} -> {r.status_code}")
+              if r.status_code == 200:
+                  return r.json()
+              return None
+
+          # ---- Start
+          repos = list_repos()
+          log(f"Total active private repositories found: {len(repos)}")
+          for r in repos: log(f"→ {r['name']}")
+
+          missing, ok = [], []
+
+          for idx, repo in enumerate(repos, start=1):
+              name = repo["name"]
+              default_branch = repo.get("default_branch", "main")
+              log(f"\n[{idx}/{len(repos)}] Checking repository: {name}")
+              log(f"Default branch for {name} is '{default_branch}'")
+
+              issues = []
+              
+              # Step 2: Check rules on default branch directly using Rules API (works with BP_PAT)
+              rules = get_rules(name, default_branch)
+              
+              if not rules:
+                  # Rules API returned empty - try classic protection endpoint as fallback
+                  classic = try_get_classic_protection(name, default_branch)
+                  if classic:
+                      issues = []
+                      pr_reviews = classic.get("required_pull_request_reviews")
+                      if not pr_reviews:
+                          issues.append("Require pull request before merging not enabled")
+                      else:
+                          cnt = pr_reviews.get("required_approving_review_count", 0)
+                          if int(cnt) != 2:
+                              issues.append(f"Required approvals = {cnt}, expected 2")
+
+                      if issues:
+                          log(f"{name}: ❌ Issues (classic branch protection) → {', '.join(issues)}")
+                          missing.append({"repo": name, "issues": issues, "source": "classic"})
+                      else:
+                          log(f"{name}: ✅ All required rules in place (classic branch protection)")
+                          ok.append(name)
+                      continue
+                  
+                  # Workaround: If classic endpoint returned 403, check common branch names for mismatch
+                  # Check master, develop, dev branches to detect misconfigured protection
+                  common_branches = ["master", "develop", "dev"]
+                  protected_branches = []
+                  
+                  for branch in common_branches:
+                      if branch != default_branch:
+                          classic_check = try_get_classic_protection(name, branch)
+                          if classic_check:
+                              protected_branches.append(branch)
+                  
+                  if protected_branches:
+                      # Found classic protection on a different branch
+                      branches_str = ", ".join(protected_branches)
+                      log(f"{name}: ⚠️ Misconfigured branch protection found: Default branch is '{default_branch}' but classic branch protection is configured for {branches_str}")
+                      missing.append({
+                          "repo": name,
+                          "issues": [f"Misconfigured branch protection found: Default branch is '{default_branch}' but classic branch protection is configured for {branches_str}"],
+                          "source": "mismatch"
+                      })
+                      continue
+                  
+                  # No protection found anywhere
+                  log(f"{name}: ❌ No branch protection rule or ruleset found on default branch '{default_branch}'. Note: Classic branch protection may exist please check manually")
+                  missing.append({
+                      "repo": name,
+                      "issues": [f"No branch protection rule or ruleset found on default branch '{default_branch}'. Note: Classic branch protection may exist please check manually"],
+                      "source": "no protection"
+                  })
+                  continue
+
+              # Rules found on default branch - determine if classic or ruleset
+              rule_source = None
+              ruleset_name = None
+              
+              # Debug: log what rules we received
+              dbg(f"Rules found on {default_branch}: {rules}")
+              
+              for rule in rules:
+                  rule_type = rule.get("type")
+                  rule_source_val = rule.get("source")
+                  ruleset_source_type = rule.get("ruleset_source_type")
+                  ruleset_source = rule.get("ruleset_source")
+                  dbg(f"Rule: type={rule_type}, source={rule_source_val}, ruleset_source_type={ruleset_source_type}")
+                  
+                  # Check for classic branch protection
+                  if rule_source_val == "BranchProtectionRule":
+                      rule_source = "classic"
+                      break
+                  # Check for ruleset (two possible formats)
+                  elif rule_source_val == "RepositoryRuleSet" or ruleset_source_type == "Repository":
+                      rule_source = "ruleset"
+                      # Try multiple ways to get ruleset name
+                      ruleset_name = rule.get("ruleset_name") or rule.get("name") or ruleset_source or "unknown"
+                      break
+
+              if not rule_source:
+                  # Rules found but we can't identify the source - provide diagnostic info
+                  sources_found = [r.get("source") for r in rules if r.get("source")]
+                  types_found = [r.get("type") for r in rules if r.get("type")]
+                  log(f"{name}: ⚠️ Branch protection rules found but source type not recognized. Sources: {sources_found}, Types: {types_found}")
+                  
+                  # Still try to validate what we can
+                  rule_types = {r.get("type"): r for r in rules}
+                  
+                  # Check for common rule types regardless of source
+                  if "pull_request" not in rule_types:
+                      issues.append("Require pull request before merging not enabled")
+                  
+                  if "required_approving_review_count" not in rule_types:
+                      issues.append("Required approving reviews rule missing")
+                  else:
+                      params = rule_types["required_approving_review_count"].get("parameters") or {}
+                      count = params.get("required_approving_review_count") or params.get("count")
+                      if not count:
+                          issues.append("Approvals rule present but count missing")
+                      elif int(count) != 2:
+                          issues.append(f"Required approvals = {count}, expected 2")
+                  
+                  if issues:
+                      log(f"{name}: ❌ Issues found in unrecognized branch protection configuration → {', '.join(issues)}")
+                      missing.append({"repo": name, "issues": issues, "source": f"unrecognized (sources: {', '.join(sources_found or ['none'])})"})
+                  else:
+                      log(f"{name}: ✅ Rules found but source type not recognized. Types: {', '.join(types_found or ['none'])}")
+                      missing.append({
+                          "repo": name,
+                          "issues": [f"Branch protection rules found but configuration type not recognized. Rule types found: {', '.join(types_found or ['none'])}"],
+                          "source": "unrecognized"
+                      })
+                  continue
+
+              if rule_source == "classic":
+                  log(f"{name}: Found classic branch protection rule on '{default_branch}'")
+                  # Verify classic branch protection settings via Rules API
+                  rule_types = {r.get("type"): r for r in rules}
+                  
+                  if "pull_request" not in rule_types:
+                      issues.append("Require pull request before merging not enabled")
+
+                  if "required_approving_review_count" not in rule_types:
+                      issues.append("Required approving reviews rule missing")
+                  else:
+                      params = rule_types["required_approving_review_count"].get("parameters") or {}
+                      count = params.get("required_approving_review_count") or params.get("count")
+                      if not count:
+                          issues.append("Approvals rule present but count missing")
+                      elif int(count) != 2:
+                          issues.append(f"Required approvals = {count}, expected 2")
+
+                  if issues:
+                      log(f"{name}: ❌ Issues (classic branch protection) → {', '.join(issues)}")
+                      missing.append({"repo": name, "issues": issues, "source": "classic"})
+                  else:
+                      log(f"{name}: ✅ All required rules in place (classic branch protection)")
+                      ok.append(name)
+
+              elif rule_source == "ruleset":
+                  log(f"{name}: Found ruleset '{ruleset_name}' on '{default_branch}'")
+                  # Ruleset matches default branch, now check the rules
+                  rule_types = {r.get("type"): r for r in rules}
+                  
+                  if "pull_request" not in rule_types:
+                      issues.append("Require pull request before merging not enabled")
+
+                  if "required_approving_review_count" not in rule_types:
+                      issues.append("Required approving reviews rule missing")
+                  else:
+                      params = rule_types["required_approving_review_count"].get("parameters") or {}
+                      count = params.get("required_approving_review_count") or params.get("count")
+                      if not count:
+                          issues.append("Approvals rule present but count missing")
+                      elif int(count) != 2:
+                          issues.append(f"Required approvals = {count}, expected 2")
+
+                  if "restrict_deletions" not in rule_types:
+                      issues.append("Restrict deletions rule not enabled")
+
+                  if "non_fast_forward" not in rule_types:
+                      issues.append("Block force pushes rule not enabled")
+
+                  if issues:
+                      log(f"{name}: ❌ Issues (ruleset '{ruleset_name}') → {', '.join(issues)}")
+                      missing.append({"repo": name, "issues": issues, "source": f"ruleset '{ruleset_name}'"})
+                  else:
+                      log(f"{name}: ✅ All required rules in place (ruleset '{ruleset_name}')")
+                      ok.append(name)
+
+          # ---- Slack reporting with smart grouping and truncation for large repos
+          if SLACK:
+              # Group repositories by issue type (consolidate all rulesets)
+              def group_by_issue_type():
+                  groups = {}
+                  for m in missing:
+                      source = m.get("source", "unknown")
+                      # Group all rulesets together regardless of ruleset name
+                      if "ruleset" in source.lower():
+                          normalized_source = "ruleset"
+                      else:
+                          normalized_source = source
+                      if normalized_source not in groups:
+                          groups[normalized_source] = []
+                      groups[normalized_source].append(m)
+                  return groups
+
+              # Generate full report as text for file upload (categorized)
+              def generate_full_report():
+                  lines = [
+                      f"Branch Protection Audit Report - {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                      "=" * 80,
+                      f"Total repositories: {len(repos)}",
+                      f"Compliant: {len(ok)}",
+                      f"With Issues: {len(missing)}",
+                      "",
+                      "REPOSITORIES WITH ISSUES (BY CATEGORY):",
+                      "=" * 80,
+                      ""
+                  ]
+                  
+                  # Group repositories by issue type
+                  groups = group_by_issue_type()
+                  source_labels = {
+                      "no protection": "NO PROTECTION",
+                      "mismatch": "MISCONFIGURED PROTECTION",
+                      "classic": "CLASSIC PROTECTION ISSUES",
+                      "ruleset": "RULESET ISSUES",
+                      "unrecognized": "UNRECOGNIZED CONFIGURATION"
+                  }
+                  
+                  # Write each category
+                  for source, repos_list in sorted(groups.items()):
+                      label = source_labels.get(source, source.upper())
+                      lines.append(f"{label} ({len(repos_list)} repositories)")
+                      lines.append("-" * 80)
+                      
+                      for m in repos_list:
+                          lines.append(f"\n{m['repo']}:")
+                          for issue in m.get("issues", []):
+                              lines.append(f"  • {issue}")
+                      
+                      lines.append("")  # Blank line between categories
+                  
+                  if ok:
+                      lines.append("=" * 80)
+                      lines.append("COMPLIANT REPOSITORIES:")
+                      lines.append("-" * 80)
+                      for repo in ok:
+                          lines.append(f"  {repo}")
+                  
+                  return "\n".join(lines)
+
+              # Send summary with grouped overview
+              MAX_REPOS_TO_SHOW = 20  # Show first 20 repos per category (except "No Protection")
+              
+              summary_block = {
+                  "type": "section",
+                  "text": {
+                      "type": "mrkdwn",
+                      "text": (
+                          f"*Branch Protection Audit Summary*\n"
+                          f"*Total repositories:* {len(repos)}\n"
+                          f"*Compliant:* {len(ok)}\n"
+                          f"*With Issues:* {len(missing)}"
+                      )
+                  }
+              }
+              
+              blocks = [summary_block]
+              
+              if missing:
+                  groups = group_by_issue_type()
+                  source_labels = {
+                      "no protection": "No Protection",
+                      "mismatch": "Misconfigured Protection",
+                      "classic": "Classic Protection Issues",
+                      "ruleset": "Ruleset Issues",
+                      "unrecognized": "Unrecognized Configuration"
+                  }
+                  
+                  # Summary by issue type
+                  issue_summary = []
+                  for source, repos_list in sorted(groups.items()):
+                      label = source_labels.get(source, source)
+                      issue_summary.append(f"• *{label}:* {len(repos_list)} repositories")
+                  
+                  if issue_summary:
+                      blocks.append({
+                          "type": "section",
+                          "text": {
+                              "type": "mrkdwn",
+                              "text": "*Issues by Category:*\n" + "\n".join(issue_summary)
+                          }
+                      })
+                  
+                  # Show repos per category
+                  for source, repos_list in sorted(groups.items()):
+                      label = source_labels.get(source, source)
+                      
+                      # For "No Protection", show all repos. For others, truncate at MAX_REPOS_TO_SHOW
+                      if source == "no protection":
+                          # Show all repos for "No Protection"
+                          repo_names = [f"• `{r['repo']}`" for r in repos_list]
+                      else:
+                          # Show limited repos with "...and X more" for other categories
+                          shown = repos_list[:MAX_REPOS_TO_SHOW]
+                          remaining = len(repos_list) - len(shown)
+                          repo_names = [f"• `{r['repo']}`" for r in shown]
+                          if remaining > 0:
+                              repo_names.append(f"• *...and {remaining} more*")
+                      
+                      blocks.append({"type": "divider"})
+                      blocks.append({
+                          "type": "section",
+                          "text": {
+                              "type": "mrkdwn",
+                              "text": f"*{label} ({len(repos_list)} total):*\n" + "\n".join(repo_names)
+                          }
+                      })
+                  
+                  # Add note about full report
+                  if len(missing) > MAX_REPOS_TO_SHOW:
+                      blocks.append({
+                          "type": "section",
+                          "text": {
+                              "type": "mrkdwn",
+                              "text": f"*Full detailed report available* ({len(missing)} repositories with issues)\nDownload from workflow artifacts: `branch-protection-report.txt`"
+                          }
+                      })
+              else:
+                  blocks.append({
+                      "type": "section",
+                      "text": {
+                          "type": "mrkdwn",
+                          "text": "*All repositories are fully compliant!*"
+                      }
+                  })
+
+              # Send summary message
+              summary_text = f"Branch Protection Audit: {len(ok)} compliant, {len(missing)} with issues out of {len(repos)} total"
+              payload = {"text": summary_text, "blocks": blocks}
+              
+              try:
+                  r = requests.post(SLACK, json=payload, timeout=30)
+                  log(f"Slack summary POST -> {r.status_code}")
+                  if r.status_code != 200:
+                      log(f"Slack error response: {r.text}", "WARN")
+              except Exception as e:
+                  log(f"Slack summary POST failed: {e}", "WARN")
+
+              # Generate and save full report
+              if missing:
+                  full_report = generate_full_report()
+                  # Save to file that can be uploaded as artifact
+                  report_file = "branch_protection_report.txt"
+                  try:
+                      with open(report_file, "w") as f:
+                          f.write(full_report)
+                      log(f"Full report saved to {report_file} ({len(full_report)} bytes)")
+                  except Exception as e:
+                      log(f"Failed to save report file: {e}", "WARN")
+          else:
+              log("No SLACK_WEBHOOK set, skipping Slack notification.", "WARN")
+          EOF
+
+      - name: Upload Full Report Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: branch-protection-report
+          path: branch_protection_report.txt
+          retention-days: 30
+          if-no-files-found: ignore
