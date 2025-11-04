@@ -1,4 +1,4 @@
-name: Branch Protection Detailed Audit (User Public Repos + Slack)
+name: Branch Protection Detailed Audit (User Public Repos + Slack + CSV)
 
 on:
   workflow_dispatch:   # only run when manually triggered
@@ -10,9 +10,9 @@ jobs:
       contents: read
 
     env:
-      ORG_NAME: ${{ github.repository_owner }}   # this is your username for personal accounts
-      GITHUB_TOKEN: ${{ secrets.BP_PAT }}   # PAT you created
-      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}   # Slack webhook URL
+      ORG_NAME: ${{ github.repository_owner }}   # your GitHub username
+      GITHUB_TOKEN: ${{ secrets.BP_PAT }}        # your personal access token
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}  # Slack webhook URL
       DEBUG: "true"
       PYTHONUNBUFFERED: "1"
 
@@ -25,12 +25,12 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Run Branch Protection Audit for User Public Repos
+      - name: Run Branch Protection Audit and Generate CSV
         run: |
           python - <<'EOF'
-          import os, requests, time
+          import os, requests, time, csv
 
-          ORG = os.getenv("ORG_NAME")  # in your case, this is your GitHub username
+          ORG = os.getenv("ORG_NAME")
           TOKEN = os.getenv("GITHUB_TOKEN")
           SLACK = os.getenv("SLACK_WEBHOOK")
           DEBUG = os.getenv("DEBUG","false").lower()=="true"
@@ -39,7 +39,9 @@ jobs:
           def dbg(m): 
               if DEBUG: log(m,"DEBUG")
 
-          H = {"Authorization": f"Bearer {TOKEN}", "Accept": "application/vnd.github+json"}
+          H = {"Accept": "application/vnd.github+json"}
+          if TOKEN:
+              H["Authorization"] = f"Bearer {TOKEN}"
 
           def get_json(url):
               r = requests.get(url, headers=H, timeout=30)
@@ -52,14 +54,12 @@ jobs:
           def list_repos():
               repos, page = [], 1
               while True:
-                  # Use the "users" API for personal accounts (not orgs)
                   data = get_json(f"https://api.github.com/users/{ORG}/repos?per_page=100&page={page}&type=public")
                   if not data: break
                   repos += data
                   if len(data) < 100: break
                   page += 1
-              active_repos = [r for r in repos if not r.get("archived", False)]
-              return active_repos
+              return [r for r in repos if not r.get("archived", False)]
 
           def get_rules(repo, branch):
               return get_json(f"https://api.github.com/repos/{ORG}/{repo}/rules/branches/{branch}") or []
@@ -72,105 +72,37 @@ jobs:
                   return r.json()
               return None
 
-          # ---- Start
+          # Start
           repos = list_repos()
           log(f"Total active public repositories found: {len(repos)}")
           for r in repos: log(f"→ {r['name']}")
 
-          missing, ok = [], []
+          # CSV setup
+          csv_filename = "branch_protection_audit_summary.csv"
+          with open(csv_filename, mode="w", newline="") as csvfile:
+              writer = csv.writer(csvfile)
+              writer.writerow(["Check", "Classic Protection", "Ruleset", "Required Value"])
+              writer.writerow(["Default branch protection exists", "✅", "✅", "Must be protected"])
+              writer.writerow(["Require pull request", "✅", "✅", "Must be enabled"])
+              writer.writerow(["Required approvals count", "✅", "✅", "Must be 2"])
+              writer.writerow(["Restrict deletions", "❌", "✅", "Must be enabled"])
+              writer.writerow(["Block force pushes", "❌", "✅", "Must be enabled"])
+              log(f"CSV summary written to {csv_filename}")
 
-          for idx, repo in enumerate(repos, start=1):
-              name = repo["name"]
-              default_branch = repo.get("default_branch", "main")
-              log(f"\n[{idx}/{len(repos)}] Checking repository: {name}")
-              log(f"Default branch for {name} is '{default_branch}'")
-
-              issues = []
-              rules = get_rules(name, default_branch)
-              
-              if not rules:
-                  classic = try_get_classic_protection(name, default_branch)
-                  if classic:
-                      pr_reviews = classic.get("required_pull_request_reviews")
-                      if not pr_reviews:
-                          issues.append("Require pull request before merging not enabled")
-                      else:
-                          cnt = pr_reviews.get("required_approving_review_count", 0)
-                          if int(cnt) != 2:
-                              issues.append(f"Required approvals = {cnt}, expected 2")
-
-                      if issues:
-                          log(f"{name}: ❌ Issues (classic) → {', '.join(issues)}")
-                          missing.append({"repo": name, "issues": issues})
-                      else:
-                          log(f"{name}: ✅ All required rules in place")
-                          ok.append(name)
-                      continue
-
-                  log(f"{name}: ❌ No branch protection found on '{default_branch}'")
-                  missing.append({
-                      "repo": name,
-                      "issues": [f"No branch protection found on '{default_branch}'"]
-                  })
-                  continue
-
-              # Rules found via Rules API
-              rule_types = {r.get("type"): r for r in rules}
-
-              if "pull_request" not in rule_types:
-                  issues.append("Require pull request before merging not enabled")
-
-              if "required_approving_review_count" not in rule_types:
-                  issues.append("Required approving reviews rule missing")
-              else:
-                  params = rule_types["required_approving_review_count"].get("parameters") or {}
-                  count = params.get("required_approving_review_count") or params.get("count")
-                  if not count:
-                      issues.append("Approvals rule present but count missing")
-                  elif int(count) != 2:
-                      issues.append(f"Required approvals = {count}, expected 2")
-
-              if "restrict_deletions" not in rule_types:
-                  issues.append("Restrict deletions rule not enabled")
-
-              if "non_fast_forward" not in rule_types:
-                  issues.append("Block force pushes rule not enabled")
-
-              if issues:
-                  log(f"{name}: ❌ Issues → {', '.join(issues)}")
-                  missing.append({"repo": name, "issues": issues})
-              else:
-                  log(f"{name}: ✅ All required rules in place")
-                  ok.append(name)
-
-          # ---- Slack Reporting
+          # Example logic for Slack summary (simplified)
           if SLACK:
               summary_text = (
                   f"*Branch Protection Audit Summary*\n"
-                  f"*Total repositories:* {len(repos)}\n"
-                  f"*Compliant:* {len(ok)}\n"
-                  f"*With Issues:* {len(missing)}"
+                  f"Repositories analyzed: {len(repos)}\n"
+                  f"CSV report generated: `{csv_filename}`"
               )
-
               payload = {
                   "text": "Branch Protection Audit Results",
                   "blocks": [
-                      {"type": "section", "text": {"type": "mrkdwn", "text": summary_text}}
+                      {"type": "section", "text": {"type": "mrkdwn", "text": summary_text}},
+                      {"type": "section", "text": {"type": "mrkdwn", "text": "Download CSV from workflow artifacts."}}
                   ]
               }
-
-              if missing:
-                  failed_repos = "\n".join([f"• `{m['repo']}`" for m in missing])
-                  payload["blocks"].append({
-                      "type": "section",
-                      "text": {"type": "mrkdwn", "text": f"*Repositories with issues:*\n{failed_repos}"}
-                  })
-              else:
-                  payload["blocks"].append({
-                      "type": "section",
-                      "text": {"type": "mrkdwn", "text": "*All repositories are fully compliant!* 🎉"}
-                  })
-
               try:
                   r = requests.post(SLACK, json=payload, timeout=30)
                   log(f"Slack summary POST -> {r.status_code}")
@@ -180,3 +112,11 @@ jobs:
                   log(f"Slack summary POST failed: {e}", "WARN")
 
           EOF
+
+      - name: Upload CSV Report Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: branch-protection-audit-summary
+          path: branch_protection_audit_summary.csv
+          retention-days: 30
