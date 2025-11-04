@@ -55,7 +55,7 @@ jobs:
               repos, page = [], 1
               while True:
                   # Use visibility=private parameter to filter at API level
-                  data = get_json(f"https://api.github.com/orgs/{ORG}/repos?per_page=100&page={page}&type=all&visibility=private")
+                  data = get_json(f"https://api.github.com/orgs/{ORG}/repos?per_page=100&page={page}&type=all&visibility=public")
                   if not data: break
                   repos += data
                   if len(data) < 100: break
