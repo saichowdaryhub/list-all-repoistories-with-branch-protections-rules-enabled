@@ -4,17 +4,19 @@ on:
   workflow_dispatch:   # only run when manually triggered
 
 jobs:
-  audit:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    audit:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
 
-    env:
-      ORG_NAME: ${{ github.repository_owner }}   # this is your username for personal accounts
-      GITHUB_TOKEN: ${{ secrets.BP_PAT }}   # PAT you created
-      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}   # Slack webhook URL
-      DEBUG: "true"
-      PYTHONUNBUFFERED: "1"
+        env:
+            ORG_NAME: ${{ github.repository_owner }}   # this is your username for personal accounts
+            GITHUB_TOKEN: ${{ secrets.BP_PAT }}   # PAT you created
+            SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}   # Slack webhook URL (fallback)
+            SLACK_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}      # Slack bot token (xoxb-...) with files:write
+            SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}      # Slack channel ID (e.g. C01234567)
+            DEBUG: "true"
+            PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Setup Python
@@ -210,20 +212,53 @@ jobs:
           except Exception as e:
               log(f"Failed to write CSV: {e}", "WARN")
 
-          # Post a simple completion message to Slack (webhook) per user request
-          if SLACK:
+          # Upload CSV to Slack via files.upload when bot token + channel are configured
+          SLACK_TOKEN = os.getenv("SLACK_TOKEN")
+          SLACK_CHANNEL = os.getenv("SLACK_CHANNEL")
+
+          def upload_csv_to_slack_token(csv_path, token, channel, message):
+              url = "https://slack.com/api/files.upload"
+              headers = {"Authorization": f"Bearer {token}"}
+              data = {
+                  "channels": channel,
+                  "initial_comment": message,
+                  "filename": os.path.basename(csv_path),
+                  "title": "branch-protection-results",
+              }
               try:
-                  r = requests.post(SLACK, json={"text": "Branch Protection Audit Summary is completed"}, timeout=30)
+                  with open(csv_path, "rb") as fh:
+                      files = {"file": (os.path.basename(csv_path), fh, "text/csv")}
+                      r = requests.post(url, headers=headers, data=data, files=files, timeout=60)
+                  log(f"Slack upload status {r.status_code}")
+                  jr = r.json()
+                  if not jr.get("ok"):
+                      log(f"Slack upload error: {jr}", "WARN")
+                      return False
+                  return True
+              except Exception as e:
+                  log(f"Slack file upload failed: {e}", "WARN")
+                  return False
+
+          completion_message = "Branch Protection Audit Summary has been completed and results are results.csv"
+          uploaded = False
+          if SLACK_TOKEN and SLACK_CHANNEL:
+              uploaded = upload_csv_to_slack_token(csv_path, SLACK_TOKEN, SLACK_CHANNEL, completion_message)
+          elif SLACK:
+              # fallback: webhook can only post text
+              try:
+                  r = requests.post(SLACK, json={"text": completion_message}, timeout=30)
                   log(f"Slack completion POST -> {r.status_code}")
                   if r.status_code != 200:
                       log(f"Slack error response: {r.text}", "WARN")
               except Exception as e:
                   log(f"Slack completion POST failed: {e}", "WARN")
 
-          EOF
+          if uploaded:
+              log("Uploaded CSV to Slack channel")
+          else:
+              if SLACK_TOKEN and SLACK_CHANNEL:
+                  log("Tried uploading to Slack but failed; check token/channel and app scopes", "WARN")
+              else:
+                  log("No Slack token/channel configured; CSV remains as artifact", "WARN")
 
-      - name: Upload results CSV
-        uses: actions/upload-artifact@v4
-        with:
-          name: branch-protection-results
-          path: results.csv
+          EOF
