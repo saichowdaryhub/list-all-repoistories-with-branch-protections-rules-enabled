@@ -94,11 +94,11 @@ jobs:
               row = {
                   "Repository": name,
                   "Default Branch": default_branch,
-                  "Default branch protection exists": "❌",
-                  "Required pull request": "❌",
+                  "Default branch protection exists": "NO",
+                  "Required pull request": "NO",
                   "Required approvals count": "-",
-                  "Restrict deletions": "❌",
-                  "Block Force pushes": "❌",
+                  "Restrict deletions": "NO",
+                  "Block Force pushes": "NO",
               }
 
               issues = []
@@ -193,33 +193,72 @@ jobs:
           # Format and send results to Slack
           if SLACK:
               try:
-                  # Create header for the Slack message
-                  message = "🔒 *Branch Protection Audit Results*\n\n"
+                  blocks = [
+                      {
+                          "type": "header",
+                          "text": {
+                              "type": "plain_text",
+                              "text": "🔒 Branch Protection Audit Results",
+                              "emoji": True
+                          }
+                      },
+                      {
+                          "type": "divider"
+                      }
+                  ]
+
+                  # Add table header as a section
+                  blocks.append({
+                      "type": "section",
+                      "fields": [
+                          {"type": "mrkdwn", "text": "*Repository*"},
+                          {"type": "mrkdwn", "text": "*Default Branch*"},
+                          {"type": "mrkdwn", "text": "*Protection*"},
+                          {"type": "mrkdwn", "text": "*PR Required*"},
+                          {"type": "mrkdwn", "text": "*Required Approvals*"},
+                          {"type": "mrkdwn", "text": "*Restrict Deletions*"},
+                          {"type": "mrkdwn", "text": "*Block Force Pushes*"}
+                      ]
+                  })
                   
-                  # Create table header
-                  header = "|Repository|Default Branch|Protection|PR Required|Required Approvals|Restrict Deletions|Block Force Pushes|\n"
-                  separator = "|---|---|---|---|---|---|---|\n"
-                  
-                  # Add table rows
-                  table_rows = ""
+                  # Add divider after header
+                  blocks.append({"type": "divider"})
+
+                  # Add each repository as a row
                   for r in rows:
-                      protection = "✅" if r["Default branch protection exists"] == "YES" else "❌"
-                      pr_required = "✅" if r["Required pull request"] == "YES" else "❌"
+                      protection = r["Default branch protection exists"]
+                      pr_required = r["Required pull request"]
                       approvals = r["Required approvals count"] if r["Required approvals count"] else "-"
-                      restrict_deletions = "✅" if r["Restrict deletions"] == "YES" else "❌"
-                      block_force = "✅" if r["Block Force pushes"] == "YES" else "❌"
+                      restrict_deletions = r["Restrict deletions"]
+                      block_force = r["Block Force pushes"]
                       
-                      table_rows += f"|{r['Repository']}|{r['Default Branch']}|{protection}|{pr_required}|{approvals}|{restrict_deletions}|{block_force}|\n"
-                  
-                  # Combine all parts
-                  full_message = message + header + separator + table_rows
-                  
-                  # Add summary
-                  summary = f"\n📊 *Summary*\n• Total Repositories: {len(repos)}\n• Fully Protected: {len(ok)}\n• Need Attention: {len(missing)}"
-                  full_message += summary
-                  
-                  # Send to Slack
-                  r = requests.post(SLACK, json={"text": full_message}, timeout=30)
+                      blocks.append({
+                          "type": "section",
+                          "fields": [
+                              {"type": "mrkdwn", "text": f"`{r['Repository']}`"},
+                              {"type": "mrkdwn", "text": f"`{r['Default Branch']}`"},
+                              {"type": "mrkdwn", "text": protection},
+                              {"type": "mrkdwn", "text": pr_required},
+                              {"type": "mrkdwn", "text": str(approvals)},
+                              {"type": "mrkdwn", "text": restrict_deletions},
+                              {"type": "mrkdwn", "text": block_force}
+                          ]
+                      })
+
+                  # Add divider before summary
+                  blocks.append({"type": "divider"})
+
+                  # Add summary section
+                  blocks.append({
+                      "type": "section",
+                      "text": {
+                          "type": "mrkdwn",
+                          "text": f"📊 *Summary*\n• Total Repositories: {len(repos)}\n• Fully Protected: {len(ok)}\n• Need Attention: {len(missing)}"
+                      }
+                  })
+
+                  # Send to Slack using blocks format
+                  r = requests.post(SLACK, json={"blocks": blocks}, timeout=30)
                   log(f"Slack message POST -> {r.status_code}")
                   if r.status_code != 200:
                       log(f"Slack error response: {r.text}", "WARN")
