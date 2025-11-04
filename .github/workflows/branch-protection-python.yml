@@ -79,21 +79,26 @@ jobs:
           rows = []
           missing, ok = [], []
 
+          # Function to send message to Slack
+          def send_to_slack(message):
+              if SLACK:
+                  requests.post(SLACK, json={"text": message})
+
           for idx, repo in enumerate(repos, start=1):
               name = repo["name"]
               default_branch = repo.get("default_branch", "main")
               log(f"\n[{idx}/{len(repos)}] Checking repository: {name}")
               log(f"Default branch for {name} is '{default_branch}'")
 
-              # default CSV row values
+              # default values
               row = {
                   "Repository": name,
                   "Default Branch": default_branch,
-                  "Default branch protection exists": "NO",
-                  "Required pull request": "NO",
-                  "Required approvals count": "",
-                  "Restrict deletions": "NO",
-                  "Block Force pushes": "NO",
+                  "Default branch protection exists": "❌",
+                  "Required pull request": "❌",
+                  "Required approvals count": "-",
+                  "Restrict deletions": "❌",
+                  "Block Force pushes": "❌",
               }
 
               issues = []
@@ -185,45 +190,44 @@ jobs:
 
               rows.append(row)
 
-          # Write CSV
-          csv_path = "results.csv"
-          fieldnames = [
-              "Repository",
-              "Default Branch",
-              "Default branch protection exists",
-              "Required pull request",
-              "Required approvals count",
-              "Restrict deletions",
-              "Block Force pushes",
-          ]
-          try:
-              with open(csv_path, "w", newline="") as fh:
-                  writer = csv.DictWriter(fh, fieldnames=fieldnames)
-                  writer.writeheader()
-                  for r in rows:
-                      writer.writerow(r)
-              log(f"Wrote CSV results to {csv_path}")
-              # print CSV contents for workflow logs
-              with open(csv_path, "r") as fh:
-                  for line in fh:
-                      print(line.rstrip())
-          except Exception as e:
-              log(f"Failed to write CSV: {e}", "WARN")
-
-          # Post a simple completion message to Slack (webhook) per user request
+          # Format and send results to Slack
           if SLACK:
               try:
-                  r = requests.post(SLACK, json={"text": "Branch Protection Audit Summary is completed"}, timeout=30)
-                  log(f"Slack completion POST -> {r.status_code}")
+                  # Create header for the Slack message
+                  message = "🔒 *Branch Protection Audit Results*\n\n"
+                  
+                  # Create table header
+                  header = "|Repository|Default Branch|Protection|PR Required|Required Approvals|Restrict Deletions|Block Force Pushes|\n"
+                  separator = "|---|---|---|---|---|---|---|\n"
+                  
+                  # Add table rows
+                  table_rows = ""
+                  for r in rows:
+                      protection = "✅" if r["Default branch protection exists"] == "YES" else "❌"
+                      pr_required = "✅" if r["Required pull request"] == "YES" else "❌"
+                      approvals = r["Required approvals count"] if r["Required approvals count"] else "-"
+                      restrict_deletions = "✅" if r["Restrict deletions"] == "YES" else "❌"
+                      block_force = "✅" if r["Block Force pushes"] == "YES" else "❌"
+                      
+                      table_rows += f"|{r['Repository']}|{r['Default Branch']}|{protection}|{pr_required}|{approvals}|{restrict_deletions}|{block_force}|\n"
+                  
+                  # Combine all parts
+                  full_message = message + header + separator + table_rows
+                  
+                  # Add summary
+                  summary = f"\n📊 *Summary*\n• Total Repositories: {len(repos)}\n• Fully Protected: {len(ok)}\n• Need Attention: {len(missing)}"
+                  full_message += summary
+                  
+                  # Send to Slack
+                  r = requests.post(SLACK, json={"text": full_message}, timeout=30)
+                  log(f"Slack message POST -> {r.status_code}")
                   if r.status_code != 200:
                       log(f"Slack error response: {r.text}", "WARN")
               except Exception as e:
-                  log(f"Slack completion POST failed: {e}", "WARN")
+                  log(f"Slack message POST failed: {e}", "WARN")
+
+          # Print results to console for workflow logs
+          for r in rows:
+              print(f"{r['Repository']}: Protection={r['Default branch protection exists']}, PR Required={r['Required pull request']}, Approvals={r['Required approvals count']}")
 
           EOF
-
-      - name: Upload results CSV
-        uses: actions/upload-artifact@v4
-        with:
-          name: branch-protection-results
-          path: results.csv
