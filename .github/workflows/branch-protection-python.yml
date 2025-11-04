@@ -12,7 +12,9 @@ jobs:
     env:
       ORG_NAME: ${{ github.repository_owner }}   # this is your username for personal accounts
       GITHUB_TOKEN: ${{ secrets.BP_PAT }}   # PAT you created
-      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}   # Slack webhook URL
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}   # Slack webhook URL (optional - posts a simple message)
+      SLACK_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}      # Slack bot token (xoxb-...) with files:write scope
+      SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}      # Slack channel ID (e.g. C01234567) where file will be uploaded
       DEBUG: "true"
       PYTHONUNBUFFERED: "1"
 
@@ -33,6 +35,8 @@ jobs:
           ORG = os.getenv("ORG_NAME")  # in your case, this is your GitHub username
           TOKEN = os.getenv("GITHUB_TOKEN")
           SLACK = os.getenv("SLACK_WEBHOOK")
+          SLACK_TOKEN = os.getenv("SLACK_TOKEN")
+          SLACK_CHANNEL = os.getenv("SLACK_CHANNEL")
           DEBUG = os.getenv("DEBUG","false").lower()=="true"
 
           def log(m,l="INFO"): print(f"[{l}] {m}", flush=True)
@@ -210,46 +214,42 @@ jobs:
           except Exception as e:
               log(f"Failed to write CSV: {e}", "WARN")
 
-          # ---- Slack Reporting (unchanged)
-          if SLACK:
-              summary_text = (
-                  f"*Branch Protection Audit Summary*\n"
-                  f"*Total repositories:* {len(repos)}\n"
-                  f"*Compliant:* {len(ok)}\n"
-                  f"*With Issues:* {len(missing)}"
-              )
+          # ---- Slack: upload CSV to Slack via files.upload when token & channel provided
+          completion_message = "Branch Protection Audit Summary has been completed and results are results.csv"
 
-              payload = {
-                  "text": "Branch Protection Audit Results",
-                  "blocks": [
-                      {"type": "section", "text": {"type": "mrkdwn", "text": summary_text}}
-                  ]
+          if SLACK_TOKEN and SLACK_CHANNEL:
+              upload_url = "https://slack.com/api/files.upload"
+              headers = {"Authorization": f"Bearer {SLACK_TOKEN}"}
+              data = {
+                  "channels": SLACK_CHANNEL,
+                  "initial_comment": completion_message,
+                  "filename": "results.csv",
+                  "title": "branch-protection-results",
               }
-
-              if missing:
-                  failed_repos = "\n".join([f"• `{m['repo']}`" for m in missing])
-                  payload["blocks"].append({
-                      "type": "section",
-                      "text": {"type": "mrkdwn", "text": f"*Repositories with issues:*\n{failed_repos}"}
-                  })
-              else:
-                  payload["blocks"].append({
-                      "type": "section",
-                      "text": {"type": "mrkdwn", "text": "*All repositories are fully compliant!* 🎉"}
-                  })
-
               try:
-                  r = requests.post(SLACK, json=payload, timeout=30)
-                  log(f"Slack summary POST -> {r.status_code}")
-                  if r.status_code != 200:
-                      log(f"Slack error response: {r.text}", "WARN")
+                  with open(csv_path, "rb") as fh:
+                      files = {"file": ("results.csv", fh, "text/csv")}
+                      r = requests.post(upload_url, headers=headers, data=data, files=files, timeout=60)
+                  log(f"Slack file upload -> {r.status_code}")
+                  try:
+                      jr = r.json()
+                      if not jr.get("ok"):
+                          log(f"Slack upload error: {jr}", "WARN")
+                  except Exception:
+                      log(f"Slack upload non-json response: {r.text}", "WARN")
               except Exception as e:
-                  log(f"Slack summary POST failed: {e}", "WARN")
+                  log(f"Slack file upload failed: {e}", "WARN")
+          elif SLACK:
+              # fallback: post a simple webhook message (not a file upload)
+              try:
+                  payload = {"text": completion_message}
+                  r = requests.post(SLACK, json=payload, timeout=30)
+                  log(f"Slack webhook POST -> {r.status_code}")
+                  if r.status_code != 200:
+                      log(f"Slack webhook error response: {r.text}", "WARN")
+              except Exception as e:
+                  log(f"Slack webhook POST failed: {e}", "WARN")
+          else:
+              log("No Slack configuration provided; skipping Slack notification", "DEBUG")
 
-          EOF
-
-      - name: Upload results CSV
-        uses: actions/upload-artifact@v4
-        with:
-          name: branch-protection-results
-          path: results.csv
+            EOF
