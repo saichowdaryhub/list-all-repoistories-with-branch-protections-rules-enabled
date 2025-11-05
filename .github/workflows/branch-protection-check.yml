@@ -102,65 +102,19 @@ jobs:
           path: results.csv
 
       - name: Send CSV to Slack
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+        uses: adrey/slack-file-upload-action@master
+        with:
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          path: results.csv
+          channel: ${{ secrets.SLACK_CHANNEL }}
+          filename: branch_protection_audit.csv
+          initial_comment: "Branch Protection Audit Results"
+          
+      - name: Debug Slack upload
+        if: failure()
         run: |
-          pwd
+          echo "Debug information for Slack upload:"
           echo "Current directory contents:"
           ls -la
-          
-          # Skip if secrets not set
-          if [ -z "$SLACK_BOT_TOKEN" ] || [ -z "$SLACK_CHANNEL" ]; then
-            echo "SLACK_BOT_TOKEN or SLACK_CHANNEL secret not set - skipping Slack upload"
-            exit 0
-          fi
-
-          if [ ! -f results.csv ]; then
-            echo "results.csv file not found. Files in directory:"
-            ls -la
-            exit 1
-          fi
-          
-          FILE_TO_UPLOAD=results.csv
-
-          echo "Selected file to upload: $FILE_TO_UPLOAD"
-          echo "File size:" && ls -lh "$FILE_TO_UPLOAD" || true
-          echo "File preview (first 20 lines):" && (head -n 20 "$FILE_TO_UPLOAD" || true)
-
-          # Ensure jq is available for parsing responses
-          if ! command -v jq >/dev/null 2>&1; then
-            echo "jq not found, installing jq"
-            sudo apt-get update && sudo apt-get install -y jq
-          fi
-
-          echo "Uploading $FILE_TO_UPLOAD to Slack channel: $SLACK_CHANNEL"
-
-          # Use Authorization header with Bearer token for Slack API and retry a few times on failure
-          max_retries=3
-          attempt=1
-          while [ $attempt -le $max_retries ]; do
-            echo "Attempt $attempt of $max_retries"
-            resp=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer $SLACK_BOT_TOKEN" -F channels="$SLACK_CHANNEL" -F file=@"$FILE_TO_UPLOAD" -F filename="results.csv" -F initial_comment="Branch Protection Audit Results" https://slack.com/api/files.upload)
-            http_code=$(tail -n1 <<< "$resp")
-            body=$(sed '$d' <<< "$resp")
-            echo "HTTP status: $http_code"
-            echo "Response body:"
-            echo "$body" | jq . || echo "$body"
-
-            ok=$(echo "$body" | jq -r '.ok' 2>/dev/null || echo "false")
-            if [ "$ok" = "true" ] && [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
-              echo "Slack upload succeeded"
-              break
-            fi
-
-            echo "Slack upload failed on attempt $attempt (http $http_code)."
-            attempt=$((attempt + 1))
-            sleep $((attempt * 2))
-          done
-
-          if [ "$ok" != "true" ]; then
-            echo "Slack upload ultimately failed after $max_retries attempts. See logs above for details."
-            # fail the step so someone notices; you can change to exit 0 to not fail the workflow
-            exit 1
-          fi
+          echo "CSV file contents (if exists):"
+          cat results.csv || echo "results.csv not found"
