@@ -43,36 +43,21 @@ jobs:
           echo "✅ CSV file created:"
           cat results.csv
 
-      # ---------- SLACK UPLOAD LOGIC -----------
-      - name: Send results to Slack
+      # ---------- UPLOAD ARTIFACT & SEND SLACK MESSAGE -----------
+      - name: Upload results.csv as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: branch-protection-results
+          path: results.csv
+
+      - name: Send workflow run link to Slack
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
         run: |
-          echo "🔍 Testing Slack upload method compatibility..."
-
-          # Try uploadV2 first
-          uploadv2_response=$(curl -s -X POST \
-            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-            -F "channel_id=$SLACK_CHANNEL" \
-            -F "initial_comment=📊 *Branch Protection Audit Results — CSV attached*" \
-            -F "file=@results.csv" \
-            https://slack.com/api/files.uploadV2)
-
-          ok=$(echo "$uploadv2_response" | jq -r '.ok')
-
-          if [ "$ok" = "true" ]; then
-            echo "✅ Successfully uploaded using files.uploadV2"
-            echo "$uploadv2_response"
-          else
-            error=$(echo "$uploadv2_response" | jq -r '.error')
-            echo "⚠️ files.uploadV2 failed with error: $error"
-            echo "↩️ Trying legacy files.upload method instead..."
-
-            legacy_response=$(curl -s -X POST \
-              -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-              -F "channels=$SLACK_CHANNEL" \
-              -F "initial_comment=📊 *Branch Protection Audit Results — CSV attached*" \
-              -F "file=@results.csv" \
-              https://slack.com/api/files.upload)
-
-            echo "Slack API response:"
-            echo "$legacy_response"
-          fi
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MESSAGE="📊 *Branch Protection Audit Results*\nThe CSV report is available as a workflow artifact.\n<${RUN_URL}|Click here to download the artifact from GitHub Actions.>"
+          curl -X POST -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H 'Content-type: application/json' \
+            --data "{\"channel\": \"$SLACK_CHANNEL\", \"text\": \"$MESSAGE\"}" \
+            https://slack.com/api/chat.postMessage
