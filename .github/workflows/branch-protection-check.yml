@@ -101,20 +101,25 @@ jobs:
           name: branch-protection-results
           path: results.csv
 
-      - name: Send CSV to Slack
-        uses: adrey/slack-file-upload-action@master
+      - name: Send CSV content to Slack as message
+        uses: slackapi/slack-github-action@v1.25.0
         with:
-          token: ${{ secrets.SLACK_BOT_TOKEN }}
-          path: results.csv
-          channel: ${{ secrets.SLACK_CHANNEL }}
-          filename: branch_protection_audit.csv
-          initial_comment: "Branch Protection Audit Results"
+          channel-id: ${{ secrets.SLACK_CHANNEL }}
+          slack-message: |
+            Branch Protection Audit Results
+            ```
+            $(cat results.csv)
+            ```
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           
-      - name: Debug Slack upload
+      - name: Debug Slack Message
         if: failure()
         run: |
-          echo "Debug information for Slack upload:"
+          echo "Debug information for Slack message:"
           echo "Current directory contents:"
           ls -la
           echo "CSV file contents (if exists):"
           cat results.csv || echo "results.csv not found"
+          echo "SLACK_CHANNEL value (redacted):"
+          echo "${SLACK_CHANNEL:0:3}... (rest hidden)"
