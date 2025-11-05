@@ -97,7 +97,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: branch-protection-audit
-          path: branch_protection_audit.csv
+          # Upload any CSV the job created (branch_protection_audit.csv or results.csv)
+          path: "*.csv"
 
       - name: Send CSV to Slack
         env:
@@ -110,10 +111,26 @@ jobs:
             exit 0
           fi
 
-          if [ ! -f branch_protection_audit.csv ]; then
-            echo "CSV file not found, nothing to upload"
-            exit 1
+          # Choose which CSV to upload. Prefer branch_protection_audit.csv, then results.csv, then newest *.csv
+          if [ -f branch_protection_audit.csv ]; then
+            FILE_TO_UPLOAD=branch_protection_audit.csv
+          elif [ -f results.csv ]; then
+            FILE_TO_UPLOAD=results.csv
+          else
+            # pick newest csv if any
+            latest_csv=$(ls -1t *.csv 2>/dev/null | head -n1 || true)
+            if [ -n "$latest_csv" ]; then
+              FILE_TO_UPLOAD="$latest_csv"
+            else
+              echo "No CSV files found in workspace. Files present:" 
+              ls -la || true
+              exit 1
+            fi
           fi
+
+          echo "Selected file to upload: $FILE_TO_UPLOAD"
+          echo "File size:" && ls -lh "$FILE_TO_UPLOAD" || true
+          echo "File preview (first 20 lines):" && (head -n 20 "$FILE_TO_UPLOAD" || true)
 
           # Ensure jq is available for parsing responses
           if ! command -v jq >/dev/null 2>&1; then
