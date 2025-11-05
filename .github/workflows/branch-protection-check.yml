@@ -56,9 +56,7 @@ jobs:
           SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
         run: |
           CSV_CONTENT=$(cat results.csv)
-          # Escape backticks for Slack code block
-          CSV_CONTENT_ESCAPED=$(echo "$CSV_CONTENT" | sed 's/`/\`/g')
-          MESSAGE="📊 *Branch Protection Audit Results*\n\n\`\`\`\n$CSV_CONTENT_ESCAPED\n\`\`\`"
+          MESSAGE="📊 *Branch Protection Audit Results*\n\n$CSV_CONTENT"
           curl -X POST -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
             -H 'Content-type: application/json' \
             --data "{\"channel\": \"$SLACK_CHANNEL\", \"text\": \"$MESSAGE\"}" \
