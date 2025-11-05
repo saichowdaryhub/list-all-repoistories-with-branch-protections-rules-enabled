@@ -115,11 +115,39 @@ jobs:
             exit 1
           fi
 
+          # Ensure jq is available for parsing responses
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "jq not found, installing jq"
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
+
           echo "Uploading branch_protection_audit.csv to Slack channel: $SLACK_CHANNEL"
-          resp=$(curl -s -F token="$SLACK_BOT_TOKEN" -F channels="$SLACK_CHANNEL" -F file=@branch_protection_audit.csv -F filename="branch_protection_audit.csv" -F initial_comment="Branch Protection Audit CSV" https://slack.com/api/files.upload)
-          echo "$resp" | jq .
-          ok=$(echo "$resp" | jq -r '.ok')
+
+          # Use Authorization header with Bearer token for Slack API and retry a few times on failure
+          max_retries=3
+          attempt=1
+          while [ $attempt -le $max_retries ]; do
+            echo "Attempt $attempt of $max_retries"
+            resp=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer $SLACK_BOT_TOKEN" -F channels="$SLACK_CHANNEL" -F file=@branch_protection_audit.csv -F filename="branch_protection_audit.csv" -F initial_comment="Branch Protection Audit CSV" https://slack.com/api/files.upload)
+            http_code=$(tail -n1 <<< "$resp")
+            body=$(sed '$d' <<< "$resp")
+            echo "HTTP status: $http_code"
+            echo "Response body:"
+            echo "$body" | jq . || echo "$body"
+
+            ok=$(echo "$body" | jq -r '.ok' 2>/dev/null || echo "false")
+            if [ "$ok" = "true" ] && [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ]; then
+              echo "Slack upload succeeded"
+              break
+            fi
+
+            echo "Slack upload failed on attempt $attempt (http $http_code)."
+            attempt=$((attempt + 1))
+            sleep $((attempt * 2))
+          done
+
           if [ "$ok" != "true" ]; then
-            echo "Slack upload failed"
+            echo "Slack upload ultimately failed after $max_retries attempts. See logs above for details."
+            # fail the step so someone notices; you can change to exit 0 to not fail the workflow
             exit 1
           fi
