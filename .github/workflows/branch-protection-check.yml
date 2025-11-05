@@ -21,9 +21,9 @@ jobs:
           protected_repos=()
           approval_repos=()
 
-          # CSV header (repository,protected,required_approvals)
-          out_csv=branch_protection_audit.csv
-          echo "repository,protected,required_approvals" > "$out_csv"
+          # CSV header (matches the format from logs)
+          out_csv=results.csv
+          echo "Repository,Default Branch,Default branch protection exists,Required pull request,Required approvals count,Restrict deletions,Block Force pushes" > "$out_csv"
 
           # Loop through all repositories page by page
           while true; do
@@ -97,8 +97,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: branch-protection-audit
-          # Upload any CSV the job created (branch_protection_audit.csv or results.csv)
-          path: "*.csv"
+          path: results.csv
 
       - name: Send CSV to Slack
         env:
@@ -111,22 +110,13 @@ jobs:
             exit 0
           fi
 
-          # Choose which CSV to upload. Prefer branch_protection_audit.csv, then results.csv, then newest *.csv
-          if [ -f branch_protection_audit.csv ]; then
-            FILE_TO_UPLOAD=branch_protection_audit.csv
-          elif [ -f results.csv ]; then
-            FILE_TO_UPLOAD=results.csv
-          else
-            # pick newest csv if any
-            latest_csv=$(ls -1t *.csv 2>/dev/null | head -n1 || true)
-            if [ -n "$latest_csv" ]; then
-              FILE_TO_UPLOAD="$latest_csv"
-            else
-              echo "No CSV files found in workspace. Files present:" 
-              ls -la || true
-              exit 1
-            fi
+          if [ ! -f results.csv ]; then
+            echo "results.csv file not found. Files in directory:"
+            ls -la
+            exit 1
           fi
+          
+          FILE_TO_UPLOAD=results.csv
 
           echo "Selected file to upload: $FILE_TO_UPLOAD"
           echo "File size:" && ls -lh "$FILE_TO_UPLOAD" || true
@@ -138,14 +128,14 @@ jobs:
             sudo apt-get update && sudo apt-get install -y jq
           fi
 
-          echo "Uploading branch_protection_audit.csv to Slack channel: $SLACK_CHANNEL"
+          echo "Uploading $FILE_TO_UPLOAD to Slack channel: $SLACK_CHANNEL"
 
           # Use Authorization header with Bearer token for Slack API and retry a few times on failure
           max_retries=3
           attempt=1
           while [ $attempt -le $max_retries ]; do
             echo "Attempt $attempt of $max_retries"
-            resp=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer $SLACK_BOT_TOKEN" -F channels="$SLACK_CHANNEL" -F file=@branch_protection_audit.csv -F filename="branch_protection_audit.csv" -F initial_comment="Branch Protection Audit CSV" https://slack.com/api/files.upload)
+            resp=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer $SLACK_BOT_TOKEN" -F channels="$SLACK_CHANNEL" -F file=@"$FILE_TO_UPLOAD" -F filename="results.csv" -F initial_comment="Branch Protection Audit Results" https://slack.com/api/files.upload)
             http_code=$(tail -n1 <<< "$resp")
             body=$(sed '$d' <<< "$resp")
             echo "HTTP status: $http_code"
