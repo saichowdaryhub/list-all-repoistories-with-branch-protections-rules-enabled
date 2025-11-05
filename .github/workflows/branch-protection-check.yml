@@ -32,13 +32,49 @@ jobs:
           echo "Repositories found:"
           cat repos.txt
 
+
       - name: Create CSV header
         run: |
-          echo "Check,Classic Protection,Ruleset,Required Value" > results.csv
-          echo "Default branch protection exists,✅,✅,Must be protected" >> results.csv
-          echo "Require pull request,✅,✅,Must be enabled" >> results.csv
-          echo "Required approvals count,✅,✅,Must be 2" >> results.csv
-          echo "Restrict deletions,❌,✅,Must be restricted" >> results.csv
+          echo "Repository,Default Branch,Protected,Require PR,Required Approvals,Restrict Deletions" > results.csv
+
+      - name: Check branch protection for each repo and append to CSV
+        env:
+          GITHUB_TOKEN: ${{ secrets.BP_PAT }}
+          ORG_NAME: ${{ github.repository_owner }}
+        run: |
+          while read repo; do
+            # Get default branch
+            default_branch=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$ORG_NAME/$repo" | jq -r '.default_branch')
+
+            # Get branch protection (returns 200 if protected, 404 if not)
+            protection=$(curl -s -o protection.json -w "%{http_code}" -H "Authorization: token $GITHUB_TOKEN" \
+              "https://api.github.com/repos/$ORG_NAME/$repo/branches/$default_branch/protection")
+
+            if [ "$protection" = "200" ]; then
+              protected="✅"
+              require_pr=$(jq -r '.required_pull_request_reviews != null' protection.json)
+              if [ "$require_pr" = "true" ]; then
+                pr="✅"
+                approvals=$(jq -r '.required_pull_request_reviews.required_approving_review_count' protection.json)
+              else
+                pr="❌"
+                approvals="-"
+              fi
+              restrict_deletions=$(jq -r '.allow_deletions.enabled' protection.json 2>/dev/null)
+              if [ "$restrict_deletions" = "false" ]; then
+                restrict="✅"
+              else
+                restrict="❌"
+              fi
+            else
+              protected="❌"
+              pr="-"
+              approvals="-"
+              restrict="-"
+            fi
+            echo "$repo,$default_branch,$protected,$pr,$approvals,$restrict" >> results.csv
+          done < repos.txt
 
           echo "✅ CSV file created:"
           cat results.csv
