@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check protected 'main' branches with 2 required approvals
+      - name: Run branch protection audit and generate CSV
         env:
           GITHUB_TOKEN: ${{ secrets.BP_PAT }}
           USER_NAME: saichowdaryhub
@@ -17,9 +17,13 @@ jobs:
           echo "Starting branch protection audit for user: $USER_NAME"
 
           # Initialize variables
-          page=1                             # Page number for pagination (GitHub returns 100 repos per page)
-          protected_repos=()                 # Array to store repos that have branch protection on 'main'
-          approval_repos=()                  # Array to store repos that specifically require 2 approvals
+          page=1
+          protected_repos=()
+          approval_repos=()
+
+          # CSV header (repository,protected,required_approvals)
+          out_csv=branch_protection_audit.csv
+          echo "repository,protected,required_approvals" > "$out_csv"
 
           # Loop through all repositories page by page
           while true; do
@@ -28,7 +32,7 @@ jobs:
                         -H "Authorization: token $GITHUB_TOKEN" \
                         -H "Accept: application/vnd.github+json" \
                         "https://api.github.com/users/$USER_NAME/repos?per_page=100&page=$page" \
-                        | jq -r '.[].name')  # Extract only the repository names
+                        | jq -r '.[].name')
 
             # If no repositories are returned, exit the loop
             if [ -z "$repos" ]; then
@@ -38,30 +42,29 @@ jobs:
             # Loop through each repository in the current page
             for repo in $repos; do
               # Fetch branch protection info for the 'main' branch
-              # Save JSON response to tmp.json and store HTTP status code
               response=$(curl -s -w "%{http_code}" -o tmp.json \
                                  -H "Authorization: token $GITHUB_TOKEN" \
                                  -H "Accept: application/vnd.github+json" \
                                  "https://api.github.com/repos/$USER_NAME/$repo/branches/main/protection")
 
-              status=$(tail -n1 <<< "$response")  # Extract the HTTP status code
+              status=$(tail -n1 <<< "$response")
 
-              # If protection exists (status 200)
               if [ "$status" -eq 200 ]; then
-                protected_repos+=("$repo")  # Add repo to protected list
-
-                # Extract number of required approvals from the JSON response
+                protected_repos+=("$repo")
                 approvals=$(jq -r '.required_pull_request_reviews.required_approving_review_count // 0' tmp.json)
+                # Append to CSV: repo,yes,approvals
+                echo "$repo,yes,$approvals" >> "$out_csv"
 
-                # If required approvals = 2, add to approval list and print message
                 if [ "$approvals" -eq 2 ]; then
                   approval_repos+=("$repo")
                   echo "$repo requires 2 approvals before merging"
                 fi
+              else
+                # Not protected -> record as not protected with 0 approvals
+                echo "$repo,no,0" >> "$out_csv"
               fi
             done
 
-            # Go to the next page of repositories
             page=$((page + 1))
           done
 
@@ -88,5 +91,35 @@ jobs:
           fi
 
           # Final message
-          echo "Branch protection audit completed."
-          
+          echo "Branch protection audit completed. CSV written to $out_csv"
+
+      - name: Upload CSV artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: branch-protection-audit
+          path: branch_protection_audit.csv
+
+      - name: Send CSV to Slack
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+        run: |
+          # Skip if secrets not set
+          if [ -z "$SLACK_BOT_TOKEN" ] || [ -z "$SLACK_CHANNEL" ]; then
+            echo "SLACK_BOT_TOKEN or SLACK_CHANNEL secret not set - skipping Slack upload"
+            exit 0
+          fi
+
+          if [ ! -f branch_protection_audit.csv ]; then
+            echo "CSV file not found, nothing to upload"
+            exit 1
+          fi
+
+          echo "Uploading branch_protection_audit.csv to Slack channel: $SLACK_CHANNEL"
+          resp=$(curl -s -F token="$SLACK_BOT_TOKEN" -F channels="$SLACK_CHANNEL" -F file=@branch_protection_audit.csv -F filename="branch_protection_audit.csv" -F initial_comment="Branch Protection Audit CSV" https://slack.com/api/files.upload)
+          echo "$resp" | jq .
+          ok=$(echo "$resp" | jq -r '.ok')
+          if [ "$ok" != "true" ]; then
+            echo "Slack upload failed"
+            exit 1
+          fi
