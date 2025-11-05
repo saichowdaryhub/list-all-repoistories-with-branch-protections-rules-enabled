@@ -50,13 +50,15 @@ jobs:
           name: branch-protection-results
           path: results.csv
 
-      - name: Send workflow run link to Slack
+      - name: Send CSV contents to Slack
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
         run: |
-          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          MESSAGE="📊 *Branch Protection Audit Results*\nThe CSV report is available as a workflow artifact.\n<${RUN_URL}|Click here to download the artifact from GitHub Actions.>"
+          CSV_CONTENT=$(cat results.csv)
+          # Escape backticks for Slack code block
+          CSV_CONTENT_ESCAPED=$(echo "$CSV_CONTENT" | sed 's/`/\`/g')
+          MESSAGE="📊 *Branch Protection Audit Results*\n\n\`\`\`\n$CSV_CONTENT_ESCAPED\n\`\`\`"
           curl -X POST -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
             -H 'Content-type: application/json' \
             --data "{\"channel\": \"$SLACK_CHANNEL\", \"text\": \"$MESSAGE\"}" \
