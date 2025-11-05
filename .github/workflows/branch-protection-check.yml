@@ -8,6 +8,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v4
+        
       - name: Run branch protection audit and generate CSV
         env:
           GITHUB_TOKEN: ${{ secrets.BP_PAT }}
@@ -96,7 +98,7 @@ jobs:
       - name: Upload CSV artifact
         uses: actions/upload-artifact@v4
         with:
-          name: branch-protection-audit
+          name: branch-protection-results
           path: results.csv
 
       - name: Send CSV to Slack
@@ -104,6 +106,10 @@ jobs:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
         run: |
+          pwd
+          echo "Current directory contents:"
+          ls -la
+          
           # Skip if secrets not set
           if [ -z "$SLACK_BOT_TOKEN" ] || [ -z "$SLACK_CHANNEL" ]; then
             echo "SLACK_BOT_TOKEN or SLACK_CHANNEL secret not set - skipping Slack upload"
