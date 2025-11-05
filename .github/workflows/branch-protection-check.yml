@@ -88,18 +88,19 @@ jobs:
           name: branch-protection-results
           path: results.csv
 
-      - name: Send CSV file to Slack channel
+      - name: Send CSV file to Slack channel (UploadV2 API)
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
         run: |
-          echo "Sending results.csv to Slack channel..."
-          
-          response=$(curl -F file=@results.csv \
-                          -F "initial_comment=📊 *Branch Protection Audit Results* — CSV attached." \
-                          -F "channels=$SLACK_CHANNEL" \
-                          -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-                          https://slack.com/api/files.upload)
+          echo "Sending results.csv to Slack using uploadV2 API..."
+
+          response=$(curl -X POST \
+              -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+              -F "channel_id=$SLACK_CHANNEL" \
+              -F "initial_comment=📊 *Branch Protection Audit Results — CSV attached*" \
+              -F "file=@results.csv" \
+              https://slack.com/api/files.uploadV2)
 
           echo "Slack API response:"
           echo "$response"
