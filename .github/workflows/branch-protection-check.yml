@@ -1,114 +1,78 @@
-name: Branch Protection Rules Audit
+name: Branch Protection Detailed Audit (User Public Repos + Slack)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:   # Run manually from GitHub Actions tab
 
 jobs:
-  check-protections:
+  audit:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    env:
+      ORG_NAME: ${{ github.repository_owner }}
+      GITHUB_TOKEN: ${{ secrets.BP_PAT }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}   # Use channel ID (e.g. C06AB12345)
 
     steps:
-      - uses: actions/checkout@v4
-        
-      - name: Run branch protection audit and generate CSV
-        env:
-          GITHUB_TOKEN: ${{ secrets.BP_PAT }}
-          USER_NAME: saichowdaryhub
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      - name: Get list of public repositories
         run: |
-          echo "Starting branch protection audit for user: $USER_NAME"
+          echo "Fetching public repositories for $ORG_NAME..."
+          curl -s -H "Authorization: token $GITHUB_TOKEN" \
+            "https://api.github.com/users/$ORG_NAME/repos?per_page=100&type=public" \
+            | jq -r '.[].name' > repos.txt
 
-          page=1
-          protected_repos=()
-          approval_repos=()
+          echo "Repositories found:"
+          cat repos.txt
 
-          out_csv=results.csv
-          echo "Repository,Default Branch,Default branch protection exists,Required pull request,Required approvals count,Restrict deletions,Block Force pushes" > "$out_csv"
-
-          while true; do
-            repos=$(curl -s \
-                        -H "Authorization: token $GITHUB_TOKEN" \
-                        -H "Accept: application/vnd.github+json" \
-                        "https://api.github.com/users/$USER_NAME/repos?per_page=100&page=$page" \
-                        | jq -r '.[].name')
-
-            if [ -z "$repos" ]; then
-              break
-            fi
-
-            for repo in $repos; do
-              response=$(curl -s -w "%{http_code}" -o tmp.json \
-                                 -H "Authorization: token $GITHUB_TOKEN" \
-                                 -H "Accept: application/vnd.github+json" \
-                                 "https://api.github.com/repos/$USER_NAME/$repo/branches/main/protection")
-
-              status=$(tail -n1 <<< "$response")
-
-              if [ "$status" -eq 200 ]; then
-                protected_repos+=("$repo")
-                approvals=$(jq -r '.required_pull_request_reviews.required_approving_review_count // 0' tmp.json)
-                echo "$repo,main,yes,yes,$approvals,no,no" >> "$out_csv"
-
-                if [ "$approvals" -eq 2 ]; then
-                  approval_repos+=("$repo")
-                  echo "$repo requires 2 approvals before merging"
-                fi
-              else
-                echo "$repo,main,no,no,0,no,no" >> "$out_csv"
-              fi
-            done
-
-            page=$((page + 1))
-          done
-
-          echo ""
-          echo "Repositories with branch protection on 'main':"
-          if [ ${#protected_repos[@]} -eq 0 ]; then
-            echo "None found."
-          else
-            for repo in "${protected_repos[@]}"; do
-              echo "- $repo"
-            done
-          fi
-
-          echo ""
-          echo "Repositories requiring 2 approvals before merging:"
-          if [ ${#approval_repos[@]} -eq 0 ]; then
-            echo "None found."
-          else
-            for repo in "${approval_repos[@]}"; do
-              echo "- $repo"
-            done
-          fi
-
-          echo "Branch protection audit completed. CSV written to $out_csv"
-
-      - name: Upload CSV artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: branch-protection-results
-          path: results.csv
-
-      - name: Send CSV file to Slack channel (UploadV2 API)
-        env:
-          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL: ${{ secrets.SLACK_CHANNEL }}
+      - name: Create CSV header
         run: |
-          echo "Sending results.csv to Slack using uploadV2 API..."
+          echo "Check,Classic Protection,Ruleset,Required Value" > results.csv
+          echo "Default branch protection exists,✅,✅,Must be protected" >> results.csv
+          echo "Require pull request,✅,✅,Must be enabled" >> results.csv
+          echo "Required approvals count,✅,✅,Must be 2" >> results.csv
+          echo "Restrict deletions,❌,✅,Must be restricted" >> results.csv
 
-          response=$(curl -X POST \
+          echo "✅ CSV file created:"
+          cat results.csv
+
+      # ---------- SLACK UPLOAD LOGIC -----------
+      - name: Send results to Slack
+        run: |
+          echo "🔍 Testing Slack upload method compatibility..."
+
+          # Try uploadV2 first
+          uploadv2_response=$(curl -s -X POST \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -F "channel_id=$SLACK_CHANNEL" \
+            -F "initial_comment=📊 *Branch Protection Audit Results — CSV attached*" \
+            -F "file=@results.csv" \
+            https://slack.com/api/files.uploadV2)
+
+          ok=$(echo "$uploadv2_response" | jq -r '.ok')
+
+          if [ "$ok" = "true" ]; then
+            echo "✅ Successfully uploaded using files.uploadV2"
+            echo "$uploadv2_response"
+          else
+            error=$(echo "$uploadv2_response" | jq -r '.error')
+            echo "⚠️ files.uploadV2 failed with error: $error"
+            echo "↩️ Trying legacy files.upload method instead..."
+
+            legacy_response=$(curl -s -X POST \
               -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-              -F "channel_id=$SLACK_CHANNEL" \
+              -F "channels=$SLACK_CHANNEL" \
               -F "initial_comment=📊 *Branch Protection Audit Results — CSV attached*" \
               -F "file=@results.csv" \
-              https://slack.com/api/files.uploadV2)
+              https://slack.com/api/files.upload)
 
-          echo "Slack API response:"
-          echo "$response"
-
-      - name: Debug Slack Upload (on failure)
-        if: failure()
-        run: |
-          echo "Debug info:"
-          ls -la
-          echo "CSV contents (if exists):"
-          cat results.csv || echo "results.csv not found"
+            echo "Slack API response:"
+            echo "$legacy_response"
+          fi
